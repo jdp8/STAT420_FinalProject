@@ -1,0 +1,310 @@
+---
+title: "Predicting PER Based on Advanced Stats"
+author: "Jonathan Perez/Christian Serra"
+date: "08/08/2021"
+output:
+  html_document: 
+    theme: readable
+    toc: yes
+  pdf_document: default
+urlcolor: cyan
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading of Necessary Libraries
+```{r warning=FALSE}
+library(readr)
+library(dplyr)
+library(MASS)
+library(corrplot)
+library(kableExtra)
+library(stringr)
+```
+
+
+## Helper Functions 
+
+```{r}
+calc_loocv_rmse = function(model) {
+sqrt(mean((resid(model) / (1 - hatvalues(model))) ^ 2))
+}
+plot_fitted_resid = function(model, pointcol = "dodgerblue", linecol = "darkorange") {
+  plot(fitted(model), resid(model), 
+       col = pointcol, pch = 20, cex = 1.5,
+       xlab = "Fitted", ylab = "Residuals")
+  abline(h = 0, col = linecol, lwd = 2)
+}
+plot_qq = function(model, pointcol = "dodgerblue", linecol = "darkorange") {
+  qqnorm(resid(model), col = pointcol, pch = 20, cex = 1.5)
+  qqline(resid(model), col = linecol, lwd = 2)
+}
+
+```
+
+## Introduction
+
+Our group made the decision to study advanced statistics from NBA players since the 3-point line was introduced in 1980. This data is available on basketball-reference.com, but only on a yearly basis. In order for us to extract the whole data set we created a scraper that gathered every year from 1980 to this last NBA season. We then merged it into a single csv file ready to be loaded into R-Studio. Our purpose is to see how advanced statistics help predict a player's efficiency rating(PER). We will build a variety of models using different combinations of predictors as well as models with only offensive variables as predictors as well as only defensive variables as predictors. While these smaller models might not be the best at predicting we are curious to see if offense or defense is better at predicting a players efficiency. 
+
+## Data Cleaning
+
+As with most data sets online, we had to clean the data in order for us to more efficiently use the data to build models. 
+
+First we start by loading the data:
+```{r warning=FALSE}
+data = read_csv("advanced_stats.csv")
+str(data)
+```
+
+We noticed that after scraping the data there are two columns that are empty, this was due to the way the data was shown on basketball-reference.com. We then proceed to remove them as well as a third column named `MVP` that will not be used. 
+```{r}
+data = na.omit(dplyr::select(data, -c(20,25,30))) # remove empty columns, MVP column and rows with NA values
+```
+
+We noticed that there are some very serious outliers in the data, an example of this is when a player only plays a single game in his career and has a game where he never missed a shot his PER will be extremely high and not representative of his actual ability. Due to this we decided to establish a cutoff and only include players that played at least 41 out of 82 games in a season and at least 15 out of 48 minutes in a game. 
+
+Another issue we encountered in the data is when a player is traded mid-season. This causes the player to show up three times in the same year, one for each team and one for the combined statistics for all teams he played in that season. We decided to only keep the combined row for each player that was traded. 
+
+The final thing we did is to change the `Pos` values to only include the five original positions(PG, SG, SF, PF, C) instead of combinations of two of those for players who sometimes played a second position. We did this because we did not want a factor variable with 16 levels. 
+
+```{r}
+qualified_player_cutoff = (48*82*0.3125) / (82/2) # Minutes in a game * games in a season * 
+# 31% of total available minutes played divided by games in a season / 2
+
+n_lines = nrow(data)
+tempName = ""
+for(i in 1:n_lines) {
+
+  has_dash = grepl("-", data$Pos[i], fixed = TRUE)
+
+  if(has_dash == TRUE){
+    first_pos = sapply(strsplit(data$Pos[i],"-"), `[`, 1)
+    data$Pos[i] = first_pos
+  }
+
+  minutes_played_per_game = data$MP[i] / data$G[i]
+
+  if(minutes_played_per_game < qualified_player_cutoff) {
+    data$G[i] = NA
+  }
+
+  if(data$Tm[i] == "TOT") {
+    tempName = data$Player[i]
+  }
+  else {
+    if(tempName == data$Player[i]) {
+      data$Player[i] = NA
+    }
+    else {
+      tempName = ""
+    }
+  }
+}
+
+
+```
+We also converted the Position(POS) column to be a factor
+```{r}
+is.factor(data$Pos)
+data$Pos = as.factor(data$Pos)
+is.factor(data$Pos)
+levels(data$Pos)
+```
+
+
+After cleaning up the unnecessary columns and duplicated players we then remove all rows that contain NAs.
+```{r}
+data = na.omit(data)
+```
+
+
+## Data Partitioning
+
+We decided to do a 70/30 split for training/testing data.
+```{r}
+dt = sort(sample(n_lines, n_lines*.7))
+train = data[dt,]
+test = data[-dt,]
+```
+
+## Methodology 
+
+For model building we start with a basic additive model using all the qualified predictors. We have a factor variable called `Pos` which states the player's playing position. We will test an additive model both including the `Pos` variable and excluding it to see if in fact it seems to be significant at $$\alpha = 0.05$$
+
+```{r}
+additive_model = lm(PER ~ . - X1 - Player - Pos - Tm, data = train) 
+additive_model_POS = lm(PER ~ . - X1 - Player - Tm, data = train) 
+
+anova(additive_model, additive_model_POS)[2,"Pr(>F)"] < 0.05
+```
+As we can see the P-Value is lower than $\alpha = 0.05$ so we reject the null hypothesis and prefer the larger model with the player positions. 
+
+With that additive model and a null model with no predictors as a starting point we built 4 additional models using the step function:
+
+- Backward AIC
+- Backward BIC
+- Forward AIC
+- Forward BIC
+```{r}
+selected_backward_AIC = step(additive_model_POS, direction = "backward", trace = 0)
+selected_backward_BIC = step(additive_model_POS, direction = "backward", trace = 0, k = log(n_lines))
+null_model = lm(PER ~ 1, data = train)
+biggest = formula(additive_model_POS) #Scope
+selected_forward_AIC = step(null_model, scope = biggest, direction = "forward", trace = 0)
+selected_forward_BIC = step(null_model, scope = biggest, direction = "forward", trace = 0, k = log(n_lines))
+
+
+table = data.frame(Method = c("Backward AIC","Backward BIC",
+"Forward AIC","Forward BIC"),
+         RMSE = c(sqrt(mean(selected_backward_AIC$residuals^2)),sqrt(mean(selected_backward_BIC$residuals^2)),
+          sqrt(mean(selected_forward_AIC$residuals^2)),sqrt(mean(selected_forward_BIC$residuals^2))),
+         R_Squared = c(summary(selected_backward_AIC)$r.squared,summary(selected_backward_BIC)$r.squared,
+         summary(selected_forward_AIC)$r.squared,summary(selected_forward_BIC)$r.squared))
+kbl(table) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+par(mfrow=c(2,2))
+plot_fitted_resid(selected_backward_AIC)
+plot_fitted_resid(selected_forward_AIC)
+plot_fitted_resid(selected_backward_BIC)
+plot_fitted_resid(selected_forward_AIC)
+
+
+```
+
+After building these four models we noticed that every method led to virtually the same predictors and RMSE. We now started looking at the predictors and using a correlation matrix and the VIF function looked for any variables that we might remove without affecting the model.
+
+```{r}
+corrplot(cor(subset(data, select = -c(Player,Pos,Tm))), type = "upper")
+car::vif(selected_forward_AIC)
+```
+
+First thing we notice is that the `Age` column barely has a relationship with the rest of the variables so we will remove it in future models. We can see that variables such as `TRB%`, `WS` and `BPM` are strongly correlated to their offensive and defensive variations, `DRB%`, `ORB%`, `OBPM`, `DBPM` `DWS`, and `OWS`. We also see strong multi-colinearity using the VIF function. Knowing this we removed `TRB%` and `BPM` from the model to see what happens. 
+
+```{r}
+additive_model_reduced = lm(PER ~ Pos + G + MP + `TS%` + `3PAr` + FTr + `ORB%` + `DRB%` + `AST%` + `STL%` + `BLK%` + `TOV%` + `USG%` + OWS + DWS + `WS/48` + OBPM + DBPM, data = train) 
+summary(additive_model_reduced)$r.squared
+sqrt(mean(additive_model_reduced$residuals^2))
+```
+We managed to remove some variables that were likely overkill and still managed to maintain the already good values for R-squared and RMSE. We then moved on to try some interactions between variables to see if we can get better results. While it was partly trial and error we had a hunch that `USG%` would be a very important variable given its positive relationship to PER. That was confirmed when comparing various combinations of interactions(These were not included for the sake of brevity) which showed that indeed the interactions of variables with `USG%` were the most significant and reduced the RMSE even more. 
+```{r}
+interaction_model_USG = lm(PER ~ (G + MP + `TS%` + `3PAr` + FTr + `ORB%` + `DRB%` + `AST%` + `STL%` + `BLK%` + `TOV%` + `USG%` + OWS + DWS + `WS/48` + OBPM + DBPM) * `USG%`, data = train) 
+summary(interaction_model_USG)$r.squared
+sqrt(mean(interaction_model_USG$residuals^2))
+```
+We then decided to try one last method and see if by running a stepwise AIC on the interaction model we could get better results or at least reduce some interactions and maintain the already good metrics achieved. We would also compare the model with all interactions of `USG%` and the selected model from the stepwise AIC process and make a statistical decision at $$ \alpha = 0.05 $$
+
+```{r}
+interaction_model_AIC = step(interaction_model_USG, trace = FALSE)
+summary(interaction_model_AIC)$r.squared
+sqrt(mean(interaction_model_AIC$residuals^2))
+anova(interaction_model_AIC, interaction_model_USG)[2, "Pr(>F)"] < 0.05
+```
+As we can see the P-Value was larger than $\alpha = 0.05$ which means we fail to reject the null-hypothesis and prefer the smaller model.
+
+## Results
+
+We now move on to test the models using the testing data we created at the beginning. We will now plot two models, first we have the best model we found which was the interaction model found through stepwise AIC, then we have the reduced additive model found through AIC where we removed additional variables that we felt were not needed. 
+```{r}
+actual = test$PER
+
+predicted_best = predict(interaction_model_AIC, newdata = test)
+predicted_additive_model_reduced = predict(additive_model_reduced, newdata = test)
+
+par(mfrow=c(1,2))
+plot(predicted_best, actual,
+     xlab = "Predicted Values",
+     ylab = "Actual Values",
+     main = "USG% Interaction AIC Model")
+abline(a = 0,                                       
+       b = 1,
+       col = "red",
+       lwd = 2)
+
+plot(predicted_additive_model_reduced, actual,
+     xlab = "Predicted Values",
+     ylab = "Actual Values",
+     main = "Additive Forward AIC Model")
+abline(a = 0,                                       
+       b = 1,
+       col = "red",
+       lwd = 2)
+
+```
+
+As we can see on the plot, the first two models are almost equally good at predicting PER. We also tested some less effective models(See Appendix).
+
+While both the USG% Interaction AIC and Reduced Additive Model are very good, we would choose the Interaction model since it gives us a lower RMSE value and a higher R-squared value. We can see these in the following table
+
+```{r}
+comparison_table = data.frame(Method = c("USG% Interaction AIC", "Reduced Additive Model"),
+         RMSE = c(sqrt(mean(interaction_model_AIC$residuals^2)),sqrt(mean(additive_model_reduced$residuals^2))),
+         R_Squared = c(summary(interaction_model_AIC)$r.squared,summary(additive_model_reduced)$r.squared))
+kbl(comparison_table) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+We added a Fitted vs. Residuals and Q-Q normality plot to show how well the data fits using the USG% Interaction AIC model.
+```{r}
+plot_fitted_resid(interaction_model_AIC)
+plot_qq(interaction_model_AIC)
+
+```
+
+## Discussion
+
+Before starting this analysis we didn't really know what to expect regarding the accuracy or how difficult it would be to find a good model. After running the first few tests we realized that even from the starting additive model we got a pretty solid one. It would only make sense that it could get better when applying the other methods learned during the class such as transformations, interactions, AIC, BIC, etc. In the end we were left with an Interaction model that used the interaction of only one variable(`USG%) and ran it through the step function and managed to improve it even more using AIC. This model is a close to perfect as we can get without abusing the number of predictors and adding all possible interactions. While there are still some predictors that have strong correlations with each other we found that removing them made the model worse, we feel confident that this model is the best choice. 
+
+## Appendix
+
+Before starting the project we had asked the question: Are offensive or defensive statistics better predictors for PER? When we built the models we noticed they were not as good as the additive or interaction models, for this reason we included them in the appendix and limited the plots and results shown.
+
+We now move on to build additional models based on whether a statistic is a defensive or an offensive one. To briefly explain, a variable such as `ORB%`(Offensive Rebound Rating) is considered an offensive statistic and `DRB%`(Defensive Rebound Rating) is considered a defensive statistic. This is done mainly for curiosity and to determine if there is an advantage to using one type of variable over the other. 
+ 
+ Offensive Statistics Models:
+```{r}
+offensive_model = lm(PER ~ `TS%` + `3PAr` + FTr + `ORB%` + `AST%` + OWS + OBPM, data = train)
+summary(offensive_model)$r.squared
+calc_loocv_rmse(offensive_model)
+
+```
+ 
+ Defensive Statistics Models: 
+```{r}
+defensive_model = lm(PER ~ `DRB%` + `STL%` + `BLK%` + DWS + DBPM, data = train)
+summary(defensive_model)$r.squared
+calc_loocv_rmse(defensive_model)
+
+```
+
+These results seem interesting, we thought both models would manage about the same but that was not the case. The offensive model performs better than the defensive model. What this tells us is that a player that is better offensively will likely have a higher Efficiency Rating than a player that is primarily a defender.
+
+We also tried to build some other models with additional transformations but these were not any better than the interaction or additive models. Many more models were built and discarded, we decided not to include every single one so that the report was not cluttered with extra code that was not actually helpful.
+
+```{r}
+
+log_model = lm(log(PER) ~ Pos + I(G^2) + I(MP^2) + I(`TS%`^2) + I(`3PAr`^2) + I(FTr^2) + I(`ORB%`^2) + I(`DRB%`^2) + 
+    I(`AST%`^2) + I(`STL%`^2) + I(`BLK%`^2) + I(`TOV%`^2) + I(`USG%`^2) + I(OWS^2) + I(DWS^2) + 
+    I(`WS/48`^2) + I(OBPM^2) + I(DBPM^2), data = train)
+
+log_model2 = lm(log(PER) ~ G + MP + `TS%` + `3PAr` + `ORB%` + `DRB%` + `AST%` + `STL%` + 
+    `BLK%` + `TOV%` + `USG%` + OWS + DWS + `WS/48` + OBPM + DBPM + 
+    G:`USG%` + `TS%`:`USG%` + `3PAr`:`USG%` + `ORB%`:`USG%` + 
+    `DRB%`:`USG%` + `AST%`:`USG%` + `STL%`:`USG%` + `TOV%`:`USG%` + 
+    `USG%`:OWS + `USG%`:DBPM, data = train)
+
+sqrt(mean(log_model$residuals^2))
+summary(log_model)$r.squared
+
+sqrt(mean(log_model2$residuals^2))
+summary(log_model2)$r.squared
+
+
+```
+
+**Group Members**:
+
+- Christian Serra
+- Jonathan Perez
