@@ -4,7 +4,8 @@ A report of the final project of the STAT 420 course of the University
 of Illinois at Urbana-Champaign. The project consisted of using advanced
 statistics to help predict a player's efficiency rating(PER). Various
 linear regression models were built using different combinations of
-predictors.
+predictors. Click [here](https://jdp8.github.io/projectPages/STAT420_FinalProject/Final_Project_STAT420.html) 
+to view the report.
 
 ## Data Source
 
